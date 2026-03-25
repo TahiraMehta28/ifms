@@ -31,7 +31,7 @@ class Database {
             }
 
             $this->client = new Client($this->atlas_uri);
-            $this->client->listDatabases();
+            // $this->client->listDatabases();
 
             error_log("✅ MongoDB connected successfully");
 

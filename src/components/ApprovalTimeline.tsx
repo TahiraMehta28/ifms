@@ -1,6 +1,23 @@
 // components/ApprovalTimeline.tsx
-import { CheckCircle, Circle, XCircle, Clock, AlertCircle } from "lucide-react";
+// Dynamic timeline — works for BOTH chains:
+//   ≤ ₹25,000  → PI → DA → AR → DR
+//   > ₹25,000  → PI → DA → AR → DR → DRC Office → DR (R&C) → DRC → Director
+
+import {
+  CheckCircle2, Clock, Circle,
+  FileText, UserCheck, Briefcase, Award,
+  Building2, FlaskConical, Users, Star,
+  RotateCcw,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
+
+const DR_THRESHOLD = 25000;
+const DRC_STAGES   = new Set(["drc_office", "drc_rc", "drc", "director"]);
+const DRC_STATUSES = new Set([
+  "dr_approved", "drc_office_forwarded", "sent_back_to_drc_office",
+  "drc_rc_forwarded", "sent_back_to_drc_rc",
+  "drc_forwarded", "sent_back_to_drc",
+]);
 
 interface ApprovalHistoryItem {
   stage: string;
@@ -14,262 +31,325 @@ interface ApprovalTimelineProps {
   approvalHistory?: ApprovalHistoryItem[];
   currentStage: string;
   status: string;
+  createdAt?: string;
+  piName?: string;
+  amount?: number;
+  /** @deprecated kept for backward compat */
+  showEmojis?: boolean;
 }
 
-export const ApprovalTimeline = ({ 
-  approvalHistory = [], 
-  currentStage, 
-  status 
-}: ApprovalTimelineProps) => {
-  
-  // Define all stages in the workflow (REMOVED AO)
-  const allStages = [
-    { key: 'created', label: 'PI Created', description: 'Budget request submitted' },
-    { key: 'admin', label: 'Admin Verified', description: 'Document verification' },
-    { key: 'ar', label: 'AR Approved', description: 'First level approval' },
-    { key: 'dr', label: 'DR Approved', description: 'Second level approval' },
-    { key: 'ao2', label: 'AO2 Final Approved', description: 'Final approval & UC generation' }
-  ];
+// ── All stage definitions ─────────────────────────────────────────────────────
+const STAGE_DEFS: Record<string, {
+  label: string; sublabel: string;
+  Icon: React.ComponentType<{ className?: string }>;
+  activeColor: string; activeBg: string; activePing: string; activeRing: string;
+}> = {
+  pi: {
+    label: "PI Submitted", sublabel: "Budget request created",
+    Icon: FileText,
+    activeColor: "text-sky-600",    activeBg: "bg-sky-50 border-sky-300",
+    activePing:  "bg-sky-500",      activeRing: "ring-sky-100",
+  },
+  da: {
+    label: "DA Processed", sublabel: "Dealing Assistant review",
+    Icon: UserCheck,
+    activeColor: "text-violet-600", activeBg: "bg-violet-50 border-violet-300",
+    activePing:  "bg-violet-500",   activeRing: "ring-violet-100",
+  },
+  ar: {
+    label: "AR Recommended", sublabel: "Assistant Registrar approval",
+    Icon: Briefcase,
+    activeColor: "text-amber-600",  activeBg: "bg-amber-50 border-amber-300",
+    activePing:  "bg-amber-500",    activeRing: "ring-amber-100",
+  },
+  dr: {
+    label: "DR",           sublabel: "Deputy Registrar",
+    Icon: Award,
+    activeColor: "text-purple-600", activeBg: "bg-purple-50 border-purple-300",
+    activePing:  "bg-purple-500",   activeRing: "ring-purple-100",
+  },
+  drc_office: {
+    label: "DRC Office", sublabel: "DRC Office review",
+    Icon: Building2,
+    activeColor: "text-cyan-600",   activeBg: "bg-cyan-50 border-cyan-300",
+    activePing:  "bg-cyan-500",     activeRing: "ring-cyan-100",
+  },
+  drc_rc: {
+    label: "DR (R&C)", sublabel: "Research & Committee review",
+    Icon: FlaskConical,
+    activeColor: "text-teal-600",   activeBg: "bg-teal-50 border-teal-300",
+    activePing:  "bg-teal-500",     activeRing: "ring-teal-100",
+  },
+  drc: {
+    label: "DRC", sublabel: "DRC final evaluation",
+    Icon: Users,
+    activeColor: "text-indigo-600", activeBg: "bg-indigo-50 border-indigo-300",
+    activePing:  "bg-indigo-500",   activeRing: "ring-indigo-100",
+  },
+  director: {
+    label: "Director", sublabel: "Director final approval",
+    Icon: Star,
+    activeColor: "text-violet-700", activeBg: "bg-violet-50 border-violet-400",
+    activePing:  "bg-violet-600",   activeRing: "ring-violet-100",
+  },
+};
 
-  const formatDate = (dateString: string) => {
-    if (!dateString) return '';
-    const date = new Date(dateString);
-    return date.toLocaleString('en-IN', {
-      day: '2-digit',
-      month: '2-digit',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: true
+const LOW_CHAIN  = ["pi", "da", "ar", "dr"];
+const HIGH_CHAIN = ["pi", "da", "ar", "dr", "drc_office", "drc_rc", "drc", "director"];
+
+function detectChain(
+  amount: number | undefined,
+  currentStage: string,
+  status: string,
+  history: ApprovalHistoryItem[]
+): string[] {
+  if (amount !== undefined && amount !== null) {
+    return amount > DR_THRESHOLD ? HIGH_CHAIN : LOW_CHAIN;
+  }
+  if (DRC_STAGES.has(currentStage)) return HIGH_CHAIN;
+  if (DRC_STATUSES.has(status))     return HIGH_CHAIN;
+  if (history.some(h => DRC_STAGES.has(h.stage))) return HIGH_CHAIN;
+  return LOW_CHAIN;
+}
+
+function resolveStatus(
+  stageKey: string,
+  chain: string[],
+  currentStage: string,
+  status: string,
+  history: ApprovalHistoryItem[]
+): "done" | "active" | "sentback" | "pending" {
+  if (stageKey === "pi") return "done";
+
+  const entry = history.find(h => h.stage === stageKey);
+  if (entry) {
+    if (entry.action === "sent_back" || entry.action === "sendback") return "sentback";
+    return "done";
+  }
+
+  if (status === "approved") return "done";
+
+  const stageIdx   = chain.indexOf(stageKey);
+  const currentIdx = chain.indexOf(currentStage);
+
+  if (stageKey === currentStage) return "active";
+  if (stageIdx < currentIdx)     return "done";
+  return "pending";
+}
+
+function actionLabel(action: string): string {
+  const map: Record<string, string> = {
+    approve: "Approved & Forwarded", approved: "Approved & Forwarded",
+    forward: "Approved & Forwarded", forwarded: "Approved & Forwarded",
+    sent_back: "Sent Back", sendback: "Sent Back",
+    submitted: "Submitted",
+  };
+  return map[action] ?? (action.charAt(0).toUpperCase() + action.slice(1));
+}
+
+const fmtDate = (d?: string) => {
+  if (!d) return null;
+  try {
+    return new Date(d).toLocaleString("en-IN", {
+      day: "2-digit", month: "short", year: "numeric",
+      hour: "2-digit", minute: "2-digit", hour12: true,
     });
-  };
+  } catch { return d; }
+};
 
-  // Get status for each stage
-  const getStageStatus = (stageKey: string) => {
-    // Check if rejected
-    if (status === 'rejected') {
-      const rejectionEntry = approvalHistory.find(
-        item => item.action === 'reject' || item.action === 'rejected'
-      );
-      if (rejectionEntry) {
-        const historyEntry = approvalHistory.find(item => item.stage === stageKey);
-        if (historyEntry) return 'completed';
-        if (rejectionEntry.stage === stageKey) return 'rejected';
-        return 'pending';
-      }
+// ═════════════════════════════════════════════════════════════════════════════
+export const ApprovalTimeline = ({
+  approvalHistory = [],
+  currentStage,
+  status,
+  createdAt,
+  piName,
+  amount,
+}: ApprovalTimelineProps) => {
+
+  const chain       = detectChain(amount, currentStage, status, approvalHistory);
+  const isHighChain = chain.length > 4;
+
+  const stages = chain.map(key => {
+    const def = { ...STAGE_DEFS[key] };
+    if (key === "dr") {
+      def.label    = isHighChain ? "DR — Forward to DRC" : "DR Approved";
+      def.sublabel = isHighChain ? "Forwarded to DRC Office" : "Deputy Registrar final approval";
     }
-
-    // Check if stage is completed
-    const historyEntry = approvalHistory.find(item => item.stage === stageKey);
-    if (historyEntry) {
-      if (historyEntry.action === 'reject' || historyEntry.action === 'rejected') {
-        return 'rejected';
-      }
-      return 'completed';
-    }
-
-    // Check if stage is current
-    if (currentStage === stageKey) return 'in-progress';
-
-    // Check stage order (REMOVED 'ao')
-    const stageOrder = ['created', 'admin', 'ar', 'dr', 'ao2'];
-    const currentIndex = stageOrder.indexOf(currentStage);
-    const checkIndex = stageOrder.indexOf(stageKey);
-    
-    if (checkIndex < currentIndex) return 'completed';
-    return 'pending';
-  };
-
-  const getIconAndColor = (stageKey: string) => {
-    const stageStatus = getStageStatus(stageKey);
-    
-    switch (stageStatus) {
-      case 'completed':
-        return {
-          icon: <CheckCircle className="h-6 w-6" />,
-          color: 'text-green-600 dark:text-green-400',
-          bgColor: 'bg-green-100 dark:bg-green-900/30',
-          borderColor: 'border-green-600 dark:border-green-400'
-        };
-      case 'in-progress':
-        return {
-          icon: <Clock className="h-6 w-6 animate-pulse" />,
-          color: 'text-blue-600 dark:text-blue-400',
-          bgColor: 'bg-blue-100 dark:bg-blue-900/30',
-          borderColor: 'border-blue-600 dark:border-blue-400'
-        };
-      case 'rejected':
-        return {
-          icon: <XCircle className="h-6 w-6" />,
-          color: 'text-red-600 dark:text-red-400',
-          bgColor: 'bg-red-100 dark:bg-red-900/30',
-          borderColor: 'border-red-600 dark:border-red-400'
-        };
-      default:
-        return {
-          icon: <Circle className="h-6 w-6" />,
-          color: 'text-gray-400 dark:text-gray-600',
-          bgColor: 'bg-gray-100 dark:bg-gray-800',
-          borderColor: 'border-gray-300 dark:border-gray-700'
-        };
-    }
-  };
-
-  const getHistoryForStage = (stageKey: string) => {
-    return approvalHistory.filter(item => item.stage === stageKey);
-  };
+    return { key, ...def };
+  });
 
   return (
-    <div className="space-y-4">
+    <div className="py-2">
+
+      {/* Title bar */}
       <div className="flex items-center gap-2 mb-6">
-        <AlertCircle className="h-5 w-5 text-muted-foreground" />
-        <h3 className="text-base font-semibold">Approval Workflow Timeline</h3>
+        <div className="h-px flex-1 bg-gradient-to-r from-transparent via-slate-200 to-transparent" />
+        <span className="text-[11px] font-semibold tracking-[0.12em] uppercase text-slate-400 px-3 flex items-center gap-2">
+          Approval Workflow
+          {isHighChain && (
+            <span className="text-[9px] bg-violet-100 text-violet-600 px-1.5 py-0.5 rounded-full normal-case font-medium">
+              &gt; ₹25k chain
+            </span>
+          )}
+        </span>
+        <div className="h-px flex-1 bg-gradient-to-l from-transparent via-slate-200 to-transparent" />
       </div>
-      
+
+      {/* Stages */}
       <div className="relative">
-        {/* Vertical connecting line */}
-        <div className="absolute left-[23px] top-8 bottom-8 w-[3px] bg-gradient-to-b from-gray-200 via-gray-300 to-gray-200 dark:from-gray-700 dark:via-gray-600 dark:to-gray-700"></div>
-        
-        {/* Timeline stages */}
-        <div className="space-y-8">
-          {allStages.map((stage, index) => {
-            const { icon, color, bgColor, borderColor } = getIconAndColor(stage.key);
-            const stageStatus = getStageStatus(stage.key);
-            const historyItems = getHistoryForStage(stage.key);
-            
-            return (
-              <div key={stage.key} className="relative">
-                <div className="flex gap-6 items-start">
-                  {/* Icon container */}
-                  <div className={cn(
-                    "relative z-10 flex-shrink-0 w-12 h-12 rounded-full border-4 flex items-center justify-center transition-all duration-300",
-                    bgColor,
-                    borderColor,
-                    color,
-                    stageStatus === 'in-progress' && "shadow-lg shadow-blue-500/50"
-                  )}>
-                    {icon}
-                  </div>
-                  
-                  {/* Content */}
-                  <div className="flex-1 min-w-0 pt-1">
-                    <div className="flex items-start justify-between gap-4 mb-2">
-                      <div className="flex-1">
-                        <h4 className={cn(
-                          "text-base font-semibold mb-1 transition-colors",
-                          stageStatus === 'completed' && "text-green-700 dark:text-green-400",
-                          stageStatus === 'in-progress' && "text-blue-700 dark:text-blue-400",
-                          stageStatus === 'rejected' && "text-red-700 dark:text-red-400",
-                          stageStatus === 'pending' && "text-gray-500 dark:text-gray-500"
-                        )}>
-                          {stage.label}
-                        </h4>
-                        <p className="text-sm text-muted-foreground">
-                          {stage.description}
-                        </p>
-                      </div>
-                      
-                      {/* Status badge */}
-                      <span className={cn(
-                        "px-3 py-1 rounded-full text-xs font-semibold uppercase tracking-wider",
-                        stageStatus === 'completed' && "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300",
-                        stageStatus === 'in-progress' && "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300 animate-pulse",
-                        stageStatus === 'rejected' && "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300",
-                        stageStatus === 'pending' && "bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400"
-                      )}>
-                        {stageStatus === 'in-progress' ? 'In Progress' : stageStatus}
-                      </span>
+        {stages.map((stage, idx) => {
+          const st      = resolveStatus(stage.key, chain, currentStage, status, approvalHistory);
+          const entry   = approvalHistory.find(h => h.stage === stage.key);
+          const isLast  = idx === stages.length - 1;
+          const isDone  = st === "done";
+          const isAct   = st === "active";
+          const isSBack = st === "sentback";
+          const isPend  = st === "pending";
+
+          const nextSt = !isLast
+            ? resolveStatus(stages[idx + 1].key, chain, currentStage, status, approvalHistory)
+            : null;
+
+          return (
+            <div key={stage.key} className="flex gap-0">
+
+              {/* Circle + connector */}
+              <div className="flex flex-col items-center w-14 flex-shrink-0">
+                <div className={cn(
+                  "w-12 h-12 rounded-full border-2 flex items-center justify-center shadow-sm z-10 transition-all duration-300",
+                  isDone  && "bg-emerald-50 border-emerald-300",
+                  isAct   && cn(stage.activeBg, "shadow-md ring-4 ring-offset-2", stage.activeRing),
+                  isSBack && "bg-orange-50 border-orange-300",
+                  isPend  && "bg-slate-50 border-slate-200",
+                )}>
+                  {isDone  && <CheckCircle2 className="h-5 w-5 text-emerald-500" />}
+                  {isAct   && (
+                    <div className="relative">
+                      <stage.Icon className={cn("h-5 w-5", stage.activeColor)} />
+                      <span className={cn("absolute -top-1 -right-1 w-2 h-2 rounded-full animate-ping opacity-75", stage.activePing)} />
+                      <span className={cn("absolute -top-1 -right-1 w-2 h-2 rounded-full", stage.activePing)} />
                     </div>
-                    
-                    {/* History details */}
-                    {historyItems.length > 0 && (
-                      <div className="mt-3 space-y-2">
-                        {historyItems.map((item, idx) => (
-                          <div 
-                            key={idx}
-                            className={cn(
-                              "p-4 rounded-lg border-l-4 transition-all",
-                              item.action === 'reject' || item.action === 'rejected' 
-                                ? "bg-red-50 dark:bg-red-900/10 border-red-400 dark:border-red-600"
-                                : "bg-green-50 dark:bg-green-900/10 border-green-400 dark:border-green-600"
-                            )}
-                          >
-                            <div className="flex items-center justify-between mb-2">
-                              <span className="text-sm font-medium text-gray-900 dark:text-gray-100">
-                                {item.action === 'reject' || item.action === 'rejected' 
-                                  ? '❌ Rejected' 
-                                  : item.action === 'forward' || item.action === 'verified_and_forwarded'
-                                  ? '✅ Verified & Forwarded'
-                                  : item.action === 'final_approved'
-                                  ? '🎉 Final Approval'
-                                  : item.action === 'created'
-                                  ? '📝 Created'
-                                  : '✅ Approved'}
-                              </span>
-                              <span className="text-xs text-muted-foreground font-mono">
-                                {formatDate(item.timestamp)}
-                              </span>
-                            </div>
-                            
-                            <p className="text-sm text-gray-700 dark:text-gray-300 mb-1">
-                              <span className="font-medium">By:</span> {item.by}
-                            </p>
-                            
-                            {item.remarks && (
-                              <div className="mt-2 pt-2 border-t border-gray-200 dark:border-gray-700">
-                                <p className="text-sm text-gray-600 dark:text-gray-400 italic">
-                                  "{item.remarks}"
-                                </p>
-                              </div>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    
-                    {/* Pending indicator */}
-                    {stageStatus === 'pending' && (
-                      <div className="mt-3 text-sm text-muted-foreground italic">
-                        ⏳ Awaiting previous stage completion
-                      </div>
-                    )}
-                  </div>
+                  )}
+                  {isSBack && <RotateCcw className="h-5 w-5 text-orange-500" />}
+                  {isPend  && <Circle    className="h-5 w-5 text-slate-300" />}
                 </div>
+
+                {!isLast && (
+                  <div className={cn(
+                    "w-0.5 flex-1 my-1 min-h-[2rem] rounded-full transition-colors duration-500",
+                    isDone && nextSt === "done" ? "bg-emerald-300"
+                    : isDone                    ? "bg-gradient-to-b from-emerald-300 to-slate-200"
+                    : isAct                     ? "bg-gradient-to-b from-slate-300 to-slate-100"
+                    :                             "bg-slate-100"
+                  )} />
+                )}
               </div>
-            );
-          })}
-        </div>
+
+              {/* Content */}
+              <div className={cn("flex-1 ml-4 pb-8", isLast && "pb-2")}>
+
+                {/* Stage header */}
+                <div className="flex items-start justify-between gap-3 mb-1.5 pt-2.5">
+                  <div>
+                    <h4 className={cn(
+                      "text-sm font-semibold leading-tight",
+                      isDone  && "text-emerald-700",
+                      isAct   && stage.activeColor,
+                      isSBack && "text-orange-700",
+                      isPend  && "text-slate-400",
+                    )}>
+                      {stage.label}
+                    </h4>
+                    <p className="text-[11px] text-slate-400 mt-0.5">{stage.sublabel}</p>
+                  </div>
+
+                  <span className={cn(
+                    "text-[10px] font-semibold tracking-wide uppercase px-2.5 py-1 rounded-full whitespace-nowrap",
+                    isDone  && "bg-emerald-100 text-emerald-700",
+                    isAct   && "bg-amber-100 text-amber-700 animate-pulse",
+                    isSBack && "bg-orange-100 text-orange-700",
+                    isPend  && "bg-slate-100 text-slate-400",
+                  )}>
+                    {isDone  && "✓ Complete"}
+                    {isAct   && "● In Progress"}
+                    {isSBack && "↩ Sent Back"}
+                    {isPend  && "Awaiting"}
+                  </span>
+                </div>
+
+                {/* PI special card */}
+                {stage.key === "pi" && (
+                  <div className="mt-2 px-3 py-2.5 rounded-lg bg-sky-50 border border-sky-100">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-xs font-medium text-sky-800">{piName || "Principal Investigator"}</p>
+                        <p className="text-[11px] text-sky-500 mt-0.5">Submitted budget booking request</p>
+                      </div>
+                      {createdAt && (
+                        <p className="text-[10px] text-sky-400 font-mono">{fmtDate(createdAt)}</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* History entry */}
+                {entry && (
+                  <div className={cn(
+                    "mt-2 px-3 py-2.5 rounded-lg border",
+                    isSBack ? "bg-orange-50 border-orange-100" : "bg-emerald-50 border-emerald-100"
+                  )}>
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-semibold text-slate-700">
+                          {actionLabel(entry.action)}
+                          <span className="ml-1.5 font-normal text-slate-500">by {entry.by}</span>
+                        </p>
+                        {entry.remarks && (
+                          <p className="text-[11px] text-slate-500 mt-1 italic leading-relaxed">
+                            "{entry.remarks}"
+                          </p>
+                        )}
+                      </div>
+                      {entry.timestamp && (
+                        <p className="text-[10px] text-slate-400 font-mono whitespace-nowrap shrink-0">
+                          {fmtDate(entry.timestamp)}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Active placeholder */}
+                {isAct && !entry && (
+                  <div className="mt-2 px-3 py-2.5 rounded-lg border border-dashed border-slate-200 bg-slate-50/60">
+                    <p className="text-[11px] text-slate-400 italic">
+                      Pending review by {stage.label}
+                    </p>
+                  </div>
+                )}
+
+                {/* Pending placeholder */}
+                {isPend && !entry && (
+                  <div className="mt-2 px-3 py-2 rounded-lg border border-dashed border-slate-100">
+                    <p className="text-[11px] text-slate-300 italic">Awaiting earlier stage completion</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
       </div>
 
-      {/* Final status message */}
-      {status === 'approved' && (
-        <div className="mt-8 p-4 bg-green-50 dark:bg-green-900/20 border-2 border-green-500 dark:border-green-600 rounded-lg">
-          <div className="flex items-center gap-3">
-            <CheckCircle className="h-6 w-6 text-green-600 dark:text-green-400" />
-            <div>
-              <h4 className="font-semibold text-green-900 dark:text-green-100">
-                🎉 Budget Request Approved!
-              </h4>
-              <p className="text-sm text-green-700 dark:text-green-300">
-                Utilization Certificate (UC) can now be generated
-              </p>
-            </div>
+      {/* Final outcome banner */}
+      {status === "approved" && (
+        <div className="mt-2 p-4 rounded-xl border-2 flex items-center gap-3 bg-emerald-50 border-emerald-300">
+          <div className="w-10 h-10 rounded-full bg-emerald-100 flex items-center justify-center shrink-0">
+            <CheckCircle2 className="h-6 w-6 text-emerald-600" />
           </div>
-        </div>
-      )}
-
-      {status === 'rejected' && (
-        <div className="mt-8 p-4 bg-red-50 dark:bg-red-900/20 border-2 border-red-500 dark:border-red-600 rounded-lg">
-          <div className="flex items-center gap-3">
-            <XCircle className="h-6 w-6 text-red-600 dark:text-red-400" />
-            <div>
-              <h4 className="font-semibold text-red-900 dark:text-red-100">
-                Budget Request Rejected
-              </h4>
-              <p className="text-sm text-red-700 dark:text-red-300">
-                Please review the rejection remarks and resubmit if necessary
-              </p>
-            </div>
+          <div>
+            <p className="text-sm font-semibold text-emerald-800">Budget Request Approved</p>
+            <p className="text-xs text-emerald-600 mt-0.5">All stages completed · Booking confirmed</p>
           </div>
         </div>
       )}
